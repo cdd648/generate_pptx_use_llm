@@ -28,8 +28,8 @@ from pathlib import Path
 
 from src.gemini_client import generate_text_with_images, edit_image
 
-DEFAULT_MODEL = "gemini-3-pro-preview"
-IMAGE_EDIT_MODEL = "gemini-3-pro-image-preview"
+DEFAULT_MODEL = "gemini-3.1-pro-preview"
+IMAGE_EDIT_MODEL = "gemini-3.1-flash-image-preview"
 
 # ═══════════════════════════════════════════════════════════
 #  Prompt：让 LLM 分析图片中的文本元素并返回结构化数据
