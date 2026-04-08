@@ -417,7 +417,7 @@ def _render_upload_area():
 
         col_idx = i % min(len(uploaded), 4)
         with cols[col_idx]:
-            st.image(save_path, caption=f.name, width="auto")
+            st.image(save_path, caption=f.name, use_container_width=True)
 
     st.info(f"已上传 **{len(uploaded)}** 张图片，点击下方按钮开始生成 PPTX")
     return uploaded, saved_paths
