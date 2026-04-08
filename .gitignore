@@ -1,4 +1,4 @@
-# Environment
+# Environment - 包含敏感信息的环境变量文件
 .env
 
 # Python
@@ -28,3 +28,16 @@ Thumbs.db
 # Temporary files
 *.tmp
 ~$*
+
+# Output files - 生成的文件不应提交到仓库
+output/
+*.pptx
+
+# Test images and examples - 示例数据可选提交
+# examples/
+
+# Logs
+*.log
+
+# Streamlit
+.streamlit/
