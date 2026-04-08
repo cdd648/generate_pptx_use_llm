@@ -466,14 +466,18 @@ def main():
     _init_page_config()
     config = _render_sidebar()
 
+    # 先渲染上传区域，让用户可以看到上传按钮
+    uploaded_files, image_paths = _render_upload_area()
+
+    # 验证配置，如果不完整则显示警告但不阻止界面渲染
     valid, err_msg = _validate_config(config)
     if not valid:
         st.sidebar.warning(err_msg)
-        st.stop()
-
-    _apply_env(config)
-
-    uploaded_files, image_paths = _render_upload_area()
+        if not image_paths:
+            st.info("👆 请先在侧边栏输入 API Key，然后上传图片")
+            st.stop()
+    else:
+        _apply_env(config)
 
     if not image_paths:
         st.info("👆 请先在上方上传图片文件")
