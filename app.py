@@ -23,11 +23,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from generate_pptx import (
-    DEFAULT_MODEL,
     IMAGE_EDIT_MODEL,
     analyze_image_text,
     build_slide_from_image,
     remove_text_from_image,
+    resolve_default_text_model,
 )
 from src.gemini_client import reset_client
 from google.genai.errors import ClientError as GeminiClientError, ServerError as GeminiServerError
@@ -55,6 +55,50 @@ def _init_page_config():
     """)
 
 
+def _render_api_mode_notice(base_url: str):
+    """Show the user which API mode is currently active."""
+    suggested_model = resolve_default_text_model(base_url)
+    if base_url:
+        st.info(
+            f"""
+当前是 **代理 / OpenAI 兼容模式**。
+
+- 建议文本分析模型使用代理支持的多模态模型，例如 `{suggested_model}`
+- 图片擦字会先尝试 `chat.completions + response_modalities=["image"]`
+- 如果代理不支持，再自动回退到 `images.edit`
+- 不同代理对图片编辑能力支持不完全一致
+"""
+        )
+    else:
+        st.info(
+            f"""
+当前是 **Google 官方 Gemini 模式**。
+
+- 建议文本分析模型使用官方模型，例如 `{suggested_model}`
+- 文本分析和图片擦字都走 `google-genai` 原生接口
+- 官方接口对图片编辑的兼容性通常更稳定
+"""
+        )
+
+
+def _render_processing_option_notice(skip_text: bool, keep_clean: bool, direct_ppt: bool):
+    """Explain what the current processing options really do."""
+    if direct_ppt:
+        st.warning(
+            "已开启“直接使用原图生成 PPTX”，本次不会调用大模型分析文本，也不会生成干净背景图；文本叠加和“保留干净背景图”都不会生效。"
+        )
+        return
+
+    if skip_text:
+        st.info(
+            "已开启“跳过文本叠加层”，本次仍会调用大模型识别文本并擦除原图文字，只是不往 PPT 中叠加可编辑文本框，适合只保留干净背景图。"
+        )
+    elif keep_clean:
+        st.caption("处理完成后会额外保留一份 `_clean.png` 干净背景图。")
+
+    st.caption("字体家族由模型估计后写回 PPT；图片分辨率过低或模型判断不准时，仍可能回退到默认字体。")
+
+
 def _render_sidebar():
     """
     渲染侧边栏配置面板
@@ -78,11 +122,13 @@ def _render_sidebar():
             help="第三方 API 端点，留空则使用 Google 官方端点",
         )
 
+        _render_api_mode_notice(base_url)
+
         st.divider()
 
         model = st.text_input(
             "文本分析模型",
-            value=DEFAULT_MODEL,
+            value=resolve_default_text_model(base_url),
             help="用于分析图片中文本元素位置的模型",
         )
 
@@ -95,16 +141,28 @@ def _render_sidebar():
         st.divider()
 
         skip_text = st.checkbox(
-            "跳过文本叠加层",
+            "跳过可编辑文本叠加层",
             value=False,
-            help="勾选后仅使用原图作为背景，不添加可编辑文本框",
+            help="勾选后仍会调用大模型清理背景，但不会在 PPT 中叠加可编辑文本框",
+        )
+
+        direct_ppt = st.checkbox(
+            "直接使用原图生成 PPTX（不调用大模型）",
+            value=False,
+            help="跳过文本分析和图片擦字，直接把原图铺成 PPT 背景。适合代理不支持图片编辑时快速兜底。",
         )
 
         keep_clean = st.checkbox(
             "保留干净背景图",
             value=False,
+            disabled=direct_ppt,
             help="保留 Gemini 擦除文字后的干净背景图片",
         )
+
+        if direct_ppt:
+            keep_clean = False
+
+        _render_processing_option_notice(skip_text, keep_clean, direct_ppt)
 
         st.divider()
 
@@ -119,6 +177,7 @@ def _render_sidebar():
                         "model": model,
                         "image_edit_model": image_edit_model,
                         "skip_text": skip_text,
+                        "direct_ppt": direct_ppt,
                         "keep_clean": keep_clean,
                     }
                     _apply_env(_test_config)
@@ -167,6 +226,7 @@ def _render_sidebar():
             "model": model,
             "image_edit_model": image_edit_model,
             "skip_text": skip_text,
+            "direct_ppt": direct_ppt,
             "keep_clean": keep_clean,
         }
 
@@ -181,6 +241,8 @@ def _validate_config(config: dict) -> tuple[bool, str]:
     Returns:
         tuple[bool, str]: (是否有效, 错误信息)
     """
+    if config.get("direct_ppt"):
+        return True, ""
     if not config["api_key"]:
         return False, "请输入 Gemini API Key"
     if not config["model"]:
@@ -232,46 +294,55 @@ def _process_single_image_with_progress(
     model = config["model"]
     image_edit_model = config["image_edit_model"]
     skip_text = config["skip_text"]
+    direct_ppt = config["direct_ppt"]
     keep_clean = config["keep_clean"]
 
     text_elements = None
     clean_image_path = image_path
 
-    if not skip_text:
+    if direct_ppt:
+        with status_container.status("⚡ **Step 1/2**: 跳过大模型，直接使用原图...", expanded=True):
+            st.write("已按前端设置跳过文本分析和图片擦字，将直接把原图铺成 PPT 背景。")
+    else:
         try:
             with status_container.status("🔍 **Step 1/3**: 分析图片中的文本元素...", expanded=True):
                 st.write(f"正在调用 `{model}` 分析图片...")
                 data = analyze_image_text(image_path, model)
-                text_elements = data.get("text_elements", [])
+                analyzed_text_elements = data.get("text_elements", [])
                 graphic_elements = data.get("graphic_elements", None)
-                st.success(f"✅ 提取到 **{len(text_elements)}** 个文本元素")
-                if text_elements:
+                st.success(f"✅ 提取到 **{len(analyzed_text_elements)}** 个文本元素")
+                if analyzed_text_elements:
                     elem_preview = "\n".join(
                         f"- 「{e['text']}」({e.get('left_pct',0)}%, {e.get('top_pct',0)}%)"
-                        for e in text_elements[:5]
+                        for e in analyzed_text_elements[:5]
                     )
-                    if len(text_elements) > 5:
-                        elem_preview += f"\n- ... 共 {len(text_elements)} 个"
+                    if len(analyzed_text_elements) > 5:
+                        elem_preview += f"\n- ... 共 {len(analyzed_text_elements)} 个"
                     st.code(elem_preview, language=None)
 
             with status_container.status("🧹 **Step 2/3**: 使用 Gemini 擦除图片文字...", expanded=True):
-                if keep_clean:
-                    base, ext = os.path.splitext(image_path)
-                    clean_output = f"{base}_clean.png"
-                else:
-                    fd, clean_output = tempfile.mkstemp(suffix=".png")
-                    os.close(fd)
+                if analyzed_text_elements:
+                    if keep_clean:
+                        base, ext = os.path.splitext(image_path)
+                        clean_output = f"{base}_clean.png"
+                    else:
+                        fd, clean_output = tempfile.mkstemp(suffix=".png")
+                        os.close(fd)
 
-                st.write(f"正在调用 `{image_edit_model}` 擦除文字...")
-                remove_text_from_image(
-                    image_path,
-                    clean_output,
-                    text_elements,
-                    graphic_elements,
-                    image_edit_model,
-                )
-                st.success("✅ 文字已擦除，干净背景图已生成")
-                clean_image_path = clean_output
+                    st.write(f"正在调用 `{image_edit_model}` 擦除文字...")
+                    remove_text_from_image(
+                        image_path,
+                        clean_output,
+                        analyzed_text_elements,
+                        graphic_elements,
+                        image_edit_model,
+                    )
+                    st.success("✅ 文字已擦除，干净背景图已生成")
+                    clean_image_path = clean_output
+                else:
+                    st.info("未识别到可擦除文本，继续使用原图作为背景。")
+
+            text_elements = None if skip_text else analyzed_text_elements
 
         except Exception as e:
             error_msg = str(e)
@@ -287,7 +358,7 @@ def _process_single_image_with_progress(
 3. 🔑 **API 权限不足** - 图片编辑功能需要特殊权限
 
 **解决方案：**
-- ✅ 勾选侧边栏 **「跳过文本叠加层」** 选项（推荐）
+- ✅ 勾选侧边栏 **「直接使用原图生成 PPTX（不调用大模型）」** 作为兜底
 - ✅ 尝试使用 Google 官方 API（清空 Base URL）
 - ✅ 更换其他支持图片编辑的模型名称
 """)
@@ -297,7 +368,8 @@ def _process_single_image_with_progress(
             clean_image_path = image_path
             text_elements = None
 
-    with status_container.status("📄 **Step 3/3**: 构建 PPTX 幻灯片...", expanded=True):
+    build_step_label = "📄 **Step 2/2**: 构建 PPTX 幻灯片..." if direct_ppt else "📄 **Step 3/3**: 构建 PPTX 幻灯片..."
+    with status_container.status(build_step_label, expanded=True):
         fd_out, output_path = tempfile.mkstemp(suffix=".pptx")
         os.close(fd_out)
 
@@ -341,6 +413,7 @@ def _process_multiple_images_with_progress(
     model = config["model"]
     image_edit_model = config["image_edit_model"]
     skip_text = config["skip_text"]
+    direct_ppt = config["direct_ppt"]
     keep_clean = config["keep_clean"]
 
     total = len(image_paths)
@@ -357,33 +430,41 @@ def _process_multiple_images_with_progress(
             text_elements = None
             clean_image_path = img_path
 
-            if not skip_text:
+            if direct_ppt:
+                st.write("  ⚡ 已按设置跳过大模型，直接使用原图。")
+            else:
                 try:
                     st.write(f"  🔍 分析文本元素...")
                     data = analyze_image_text(img_path, model)
-                    text_elements = data.get("text_elements", [])
+                    analyzed_text_elements = data.get("text_elements", [])
                     graphic_elements = data.get("graphic_elements", None)
-                    st.write(f"  ✅ 提取到 {len(text_elements)} 个文本元素")
+                    st.write(f"  ✅ 提取到 {len(analyzed_text_elements)} 个文本元素")
 
                     st.write(f"  🧹 擦除文字...")
-                    if keep_clean:
-                        base, ext = os.path.splitext(img_path)
-                        clean_output = f"{base}_clean.png"
-                    else:
-                        fd, clean_output = tempfile.mkstemp(suffix=".png")
-                        os.close(fd)
+                    if analyzed_text_elements:
+                        if keep_clean:
+                            base, ext = os.path.splitext(img_path)
+                            clean_output = f"{base}_clean.png"
+                        else:
+                            fd, clean_output = tempfile.mkstemp(suffix=".png")
+                            os.close(fd)
 
-                    remove_text_from_image(
-                        img_path, clean_output,
-                        text_elements, graphic_elements, image_edit_model,
-                    )
-                    clean_image_path = clean_output
-                    all_clean_paths.append(clean_output)
-                    st.write(f"  ✅ 文字已擦除")
+                        remove_text_from_image(
+                            img_path, clean_output,
+                            analyzed_text_elements, graphic_elements, image_edit_model,
+                        )
+                        clean_image_path = clean_output
+                        all_clean_paths.append(clean_output)
+                        st.write(f"  ✅ 文字已擦除")
+                    else:
+                        st.write("  ℹ️ 未识别到可擦除文本，继续使用原图。")
+
+                    text_elements = None if skip_text else analyzed_text_elements
 
                 except Exception as e:
                     st.warning(f"  ⚠️ 处理失败，使用原图: {e}")
                     clean_image_path = img_path
+                    text_elements = None
 
             st.write(f"  📄 构建幻灯片...")
             build_slide_from_image(prs, clean_image_path, text_elements)
@@ -471,11 +552,18 @@ def _render_result(output_path: str | None, config: dict):
     with col_info:
         file_size = os.path.getsize(output_path)
         size_str = f"{file_size / 1024:.1f} KB" if file_size < 1024 * 1024 else f"{file_size / 1024 / 1024:.1f} MB"
+        llm_status = "❌ 已跳过（直接原图）" if config.get("direct_ppt") else "✅ 已启用"
+        text_overlay_status = (
+            "未执行（未调用大模型）"
+            if config.get("direct_ppt")
+            else ("❌ 已关闭" if config["skip_text"] else "✅ 已开启")
+        )
         st.markdown(f"""
         - 📦 文件大小：**{size_str}**
+        - 🤖 大模型处理：{llm_status}
         - 🤖 文本分析模型：`{config['model']}`
         - 🎨 图片编辑模型：`{config['image_edit_model']}`
-        - 📝 文本叠加：{'❌ 已关闭' if config['skip_text'] else '✅ 已开启'}
+        - 📝 文本叠加：{text_overlay_status}
         """)
 
 
@@ -494,7 +582,7 @@ def main():
         if not image_paths:
             st.info("👆 请先在侧边栏输入 API Key，然后上传图片")
             st.stop()
-    else:
+    elif not config.get("direct_ppt"):
         _apply_env(config)
 
     if not image_paths:

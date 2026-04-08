@@ -254,9 +254,11 @@ def edit_image(
     model: str, prompt: str, image_path: str
 ) -> bytes | None:
     """
-    发送图片和编辑提示到图片编辑模型（OpenAI images/edits 格式）
+    发送图片和编辑提示到图片编辑模型
 
-    注意：并非所有第三方代理都支持图片编辑功能
+    支持两种调用方式：
+    1. OpenAI 原生 images/edit 格式（标准方式）
+    2. vectorengine.ai 格式：通过 chat/completions 接口，使用 response_modalities 参数
 
     Args:
         model: 图片编辑模型名称
@@ -269,6 +271,41 @@ def edit_image(
     client = get_client()
 
     def _do_call():
+        # 方案1：尝试 vectorengine.ai 格式（chat completions + response_modalities）
+        try:
+            data_uri = _image_to_base64_data_uri(image_path)
+
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {"type": "image_url", "image_url": {"url": data_uri}},
+                        ],
+                    }
+                ],
+                # The OpenAI SDK does not expose this proxy-specific field in the
+                # typed method signature, so we need to pass it through `extra_body`.
+                extra_body={"response_modalities": ["image"]},
+            )
+
+            content = response.choices[0].message.content
+
+            # 解析返回的图片数据（支持多种格式）
+            return _parse_image_response(content, response)
+
+        except Exception as e:
+            # 如果 vectorengine.ai 格式失败，尝试标准 OpenAI images/edit 格式
+            error_msg = str(e).lower()
+            # 如果是明确的格式错误，直接抛出；否则尝试备用方案
+            if "response_modalities" in error_msg or "unexpected keyword" in error_msg:
+                pass  # 尝试备用方案
+            else:
+                raise
+
+        # 方案2：标准 OpenAI images/edit 格式
         with open(image_path, "rb") as f:
             image_file = f.read()
 
@@ -289,6 +326,50 @@ def edit_image(
 
     try:
         return _call_with_retry(_do_call)
-    except Exception:
-        # 图片编辑可能不被支持，静默失败
-        return None
+    except Exception as e:
+        raise RuntimeError(f"OpenAI-compatible image edit failed: {e}") from e
+
+
+def _parse_image_response(content, response) -> bytes | None:
+    """
+    解析图片编辑 API 返回的数据，支持多种格式
+
+    支持的格式：
+    1. Markdown base64 格式：![image](data:image/png;base64,xxx)
+    2. 列表格式：[{"image": {"base64": "xxx"}}]
+    3. OpenAI 原生 images/generations 格式：{"data": [{"b64_json": "xxx"}]}
+
+    Args:
+        content: 响应内容
+        response: 完整响应对象
+
+    Returns:
+        bytes | None: 解码后的图片二进制数据
+    """
+    import re
+
+    # 方案1：Markdown 格式 base64（vectorengine.ai Gemini 模型实际返回格式）
+    if isinstance(content, str) and "base64" in content:
+        match = re.search(r'data:image/[^;]+;base64,([A-Za-z0-9+/=]+)', content)
+        if match:
+            return base64.b64decode(match.group(1))
+
+    # 方案2：列表格式（标准 OpenAI 多模态格式）
+    if isinstance(content, list) and len(content) > 0 and isinstance(content[0], dict):
+        if "image" in content[0]:
+            img_data = content[0]["image"]
+            if "base64" in img_data:
+                return base64.b64decode(img_data["base64"])
+            if "url" in img_data:
+                return httpx.get(img_data["url"], timeout=60).content
+
+    # 方案3：OpenAI 原生 images/generations 格式
+    if hasattr(response, "data") and response.data and len(response.data) > 0:
+        if hasattr(response.data[0], "b64_json") and response.data[0].b64_json:
+            return base64.b64decode(response.data[0].b64_json)
+        if hasattr(response.data[0], "url") and response.data[0].url:
+            return httpx.get(response.data[0].url, timeout=60).content
+
+    raise ValueError(
+        f"无法识别返回格式，content类型: {type(content)}, 内容预览: {str(content)[:300]}"
+    )

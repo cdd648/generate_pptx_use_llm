@@ -1,50 +1,48 @@
 """
-测试 gemini-3.1-pro-preview 模型
+Quick probe for the gemini-3.1-pro-preview model on the configured proxy.
 """
-import os
-from dotenv import load_dotenv
 
-load_dotenv()
+from openai import OpenAI
 
-API_KEY = os.getenv("GEMINI_API_KEY", "")
-BASE_URL = "https://api.vectorengine.ai/v1"
+from test_support import get_api_key, get_proxy_base_url, init_env, short_text
 
-def test_model(model_name):
-    """测试模型"""
+
+init_env()
+
+API_KEY = get_api_key()
+BASE_URL = get_proxy_base_url()
+MODEL_NAME = "gemini-3.1-pro-preview"
+
+
+def test_model(model_name: str) -> tuple[bool, str]:
     try:
-        from openai import OpenAI
-        
-        client = OpenAI(
-            api_key=API_KEY,
-            base_url=BASE_URL,
-        )
-        
+        client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
         response = client.chat.completions.create(
             model=model_name,
             messages=[{"role": "user", "content": "Hi"}],
             max_tokens=10,
         )
-        return True, response.choices[0].message.content[:50]
-        
+        return True, short_text(response.choices[0].message.content, limit=80)
     except Exception as e:
-        return False, str(e)[:100]
+        return False, short_text(e, limit=120)
 
 
-def main():
+def main() -> None:
     print("=" * 60)
-    print("测试 gemini-3.1-pro-preview")
+    print(f"Model probe: {MODEL_NAME}")
     print("=" * 60)
-    
-    model = "gemini-3.1-pro-preview"
-    print(f"\n测试: {model}")
-    success, result = test_model(model)
-    
+    print(f"Proxy: {BASE_URL}")
+    print(f"API key set: {'yes' if API_KEY else 'no'}")
+
+    if not API_KEY:
+        print("[X] GEMINI_API_KEY is not set")
+        return
+
+    success, result = test_model(MODEL_NAME)
     if success:
-        print(f"[OK] 可用 - {result}")
-        print("\n可以在 Streamlit 中使用这个模型作为文本分析模型")
+        print(f"\n[OK] {result}")
     else:
-        print(f"[X] 失败 - {result}")
-        print("\n该模型在此代理下不可用")
+        print(f"\n[X] {result}")
 
 
 if __name__ == "__main__":

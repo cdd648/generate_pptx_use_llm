@@ -28,8 +28,22 @@ from pathlib import Path
 
 from src.gemini_client import generate_text_with_images, edit_image
 
-DEFAULT_MODEL = "gemini-3.1-pro-preview"
+OFFICIAL_DEFAULT_MODEL = "gemini-3.1-pro-preview"
+PROXY_DEFAULT_MODEL = "gpt-4o"
 IMAGE_EDIT_MODEL = "gemini-3.1-flash-image-preview"
+DEFAULT_FONT_NAME = "Microsoft YaHei"
+
+
+def resolve_default_text_model(base_url: str | None = None) -> str:
+    override = os.getenv("TEXT_ANALYSIS_MODEL_DEFAULT", "").strip()
+    if override:
+        return override
+
+    effective_base_url = base_url if base_url is not None else os.getenv("GEMINI_BASE_URL", "")
+    return PROXY_DEFAULT_MODEL if effective_base_url else OFFICIAL_DEFAULT_MODEL
+
+
+DEFAULT_MODEL = resolve_default_text_model()
 
 # ═══════════════════════════════════════════════════════════
 #  Prompt：让 LLM 分析图片中的文本元素并返回结构化数据
@@ -52,6 +66,7 @@ SYSTEM_PROMPT = """\
       "width_pct": 70.0,
       "height_pct": 10.0,
       "font_size_pt": 40,
+      "font_family": "Microsoft YaHei",
       "font_bold": true,
       "font_color_hex": "FFFFFF",
       "alignment": "center"
@@ -86,7 +101,7 @@ SYSTEM_PROMPT = """\
 6. JSON 用 ```json ``` 包裹
 """
 
-USER_PROMPT = "请分析这张信息图幻灯片中的所有文本元素，提取位置、样式信息。返回 JSON 格式数据。"
+USER_PROMPT = "请分析这张信息图幻灯片中的所有文本元素，提取位置、样式信息。请尽量识别每个文本元素的字体家族（font_family），返回 JSON 格式数据。"
 
 TEXT_REMOVAL_PROMPT_TEMPLATE = (
     "Edit this image to remove ALL text and numbers. "
@@ -111,6 +126,58 @@ def _extract_json(response_text: str) -> dict:
     match = re.search(r'```json\s*\n(.*?)```', response_text, re.DOTALL)
     json_str = match.group(1).strip() if match else response_text.strip()
     return json.loads(json_str)
+
+
+def _normalize_font_name(font_name: str | None) -> str:
+    """Normalize model-provided font families to names PowerPoint can use."""
+    if not font_name:
+        return DEFAULT_FONT_NAME
+
+    normalized = str(font_name).strip().strip('"').strip("'")
+    if not normalized:
+        return DEFAULT_FONT_NAME
+
+    alias_map = {
+        "微软雅黑": "Microsoft YaHei",
+        "微軟雅黑": "Microsoft YaHei",
+        "microsoft yahei": "Microsoft YaHei",
+        "microsoft yahei ui": "Microsoft YaHei UI",
+        "宋体": "SimSun",
+        "simsun": "SimSun",
+        "黑体": "SimHei",
+        "simhei": "SimHei",
+        "楷体": "KaiTi",
+        "kaiti": "KaiTi",
+        "仿宋": "FangSong",
+        "fangsong": "FangSong",
+    }
+
+    return alias_map.get(normalized, alias_map.get(normalized.lower(), normalized))
+
+
+def _normalize_color_hex(color_hex: str | None) -> str:
+    """Keep only a 6-digit RGB hex value; otherwise fall back to dark gray."""
+    if not color_hex:
+        return "333333"
+
+    match = re.search(r"([0-9A-Fa-f]{6})", str(color_hex))
+    return match.group(1).upper() if match else "333333"
+
+
+def _apply_font_family(font, font_name: str) -> None:
+    """Set Latin and East Asian font families so CJK text keeps the chosen font."""
+    from pptx.oxml.ns import qn
+    from pptx.oxml.xmlchemy import OxmlElement
+
+    font.name = font_name
+
+    for tag_name in ("ea", "cs"):
+        tag = qn(f"a:{tag_name}")
+        node = font._rPr.find(tag)
+        if node is None:
+            node = OxmlElement(f"a:{tag_name}")
+            font._rPr.append(node)
+        node.set("typeface", font_name)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -237,7 +304,11 @@ def analyze_image_text(image_path: str, model: str = DEFAULT_MODEL) -> dict:
         user_prompt=USER_PROMPT,
         image_paths=[image_path],
     )
-    return _extract_json(response)
+    data = _extract_json(response)
+    for elem in data.get("text_elements", []):
+        if "font_family" not in elem and "font_name" in elem:
+            elem["font_family"] = elem["font_name"]
+    return data
 
 
 # ═══════════════════════════════════════════════════════════
@@ -295,9 +366,14 @@ def build_slide_from_image(
             font = p.font
             font.size = Pt(int(elem.get("font_size_pt", 14) * 0.85))
             font.bold = elem.get("font_bold", False)
-            font.name = "Microsoft YaHei"
+            _apply_font_family(
+                font,
+                _normalize_font_name(
+                    elem.get("font_family") or elem.get("font_name")
+                ),
+            )
 
-            color_hex = elem.get("font_color_hex", "333333")
+            color_hex = _normalize_color_hex(elem.get("font_color_hex"))
             font.color.rgb = RGBColor(
                 int(color_hex[0:2], 16),
                 int(color_hex[2:4], 16),
@@ -314,21 +390,22 @@ def process_single_image(
     image_edit_model: str = IMAGE_EDIT_MODEL,
     skip_text_overlay: bool = False,
     keep_clean_image: bool = False,
+    skip_model_processing: bool = False,
 ):
     """处理单张图片：分析文本 → Gemini 擦除文字 → 构建幻灯片。"""
     text_elements = None
     clean_image_path = image_path  # 默认使用原图
 
-    if not skip_text_overlay:
+    if not skip_model_processing:
         try:
             # Step 1: 分析文本元素
             data = analyze_image_text(image_path, model)
-            text_elements = data.get("text_elements", [])
-            print(f"  提取到 {len(text_elements)} 个文本元素")
+            analyzed_text_elements = data.get("text_elements", [])
+            print(f"  提取到 {len(analyzed_text_elements)} 个文本元素")
 
             # Step 2: 用 Gemini 擦除文字
             graphic_elements = data.get("graphic_elements", None)
-            if text_elements:
+            if analyzed_text_elements:
                 if keep_clean_image:
                     base, ext = os.path.splitext(image_path)
                     clean_image_path = f"{base}_clean.png"
@@ -338,14 +415,16 @@ def process_single_image(
 
                 remove_text_from_image(
                     image_path, clean_image_path,
-                    text_elements, graphic_elements, image_edit_model,
+                    analyzed_text_elements, graphic_elements, image_edit_model,
                 )
                 print(f"  干净背景图已生成: {clean_image_path}")
+            text_elements = None if skip_text_overlay else analyzed_text_elements
         except Exception as e:
             print(f"  [警告] 处理失败，将使用原图: {e}")
             import traceback
             traceback.print_exc()
             clean_image_path = image_path
+            text_elements = None
 
     # Step 3: 构建幻灯片
     build_slide_from_image(prs, clean_image_path, text_elements)
@@ -365,6 +444,7 @@ def generate_pptx_from_image(
     image_edit_model: str = IMAGE_EDIT_MODEL,
     skip_text_overlay: bool = False,
     keep_clean_image: bool = False,
+    skip_model_processing: bool = False,
 ) -> bool:
     """从单张图片生成 PPTX。"""
     from pptx import Presentation
@@ -376,7 +456,7 @@ def generate_pptx_from_image(
 
     process_single_image(
         prs, image_path, model, image_edit_model,
-        skip_text_overlay, keep_clean_image,
+        skip_text_overlay, keep_clean_image, skip_model_processing,
     )
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
@@ -392,6 +472,7 @@ def generate_pptx_from_images(
     image_edit_model: str = IMAGE_EDIT_MODEL,
     skip_text_overlay: bool = False,
     keep_clean_image: bool = False,
+    skip_model_processing: bool = False,
 ) -> bool:
     """从多张图片生成包含多页的 PPTX。"""
     from pptx import Presentation
@@ -405,7 +486,7 @@ def generate_pptx_from_images(
         print(f"\n── 处理第 {i + 1}/{len(image_paths)} 张 ──")
         process_single_image(
             prs, img_path, model, image_edit_model,
-            skip_text_overlay, keep_clean_image,
+            skip_text_overlay, keep_clean_image, skip_model_processing,
         )
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
@@ -433,11 +514,15 @@ def main():
     )
     parser.add_argument(
         "--no-text", action="store_true",
-        help="不添加文本叠加层（仅图片背景）"
+        help="不在 PPT 中叠加可编辑文本框（仍会调用大模型分析文本并生成干净背景）"
     )
     parser.add_argument(
         "--keep-clean", action="store_true",
         help="保留擦除文字后的干净图片（默认删除临时文件）"
+    )
+    parser.add_argument(
+        "--direct-ppt", action="store_true",
+        help="不调用大模型，直接使用原图生成 PPTX（快速兜底模式）"
     )
 
     args = parser.parse_args()
@@ -445,7 +530,7 @@ def main():
     if args.image:
         success = generate_pptx_from_image(
             args.image, args.output, args.model,
-            args.image_edit_model, args.no_text, args.keep_clean,
+            args.image_edit_model, args.no_text, args.keep_clean, args.direct_ppt,
         )
     else:
         img_dir = Path(args.image_dir)
@@ -459,7 +544,7 @@ def main():
         print(f"找到 {len(images)} 张图片")
         success = generate_pptx_from_images(
             images, args.output, args.model,
-            args.image_edit_model, args.no_text, args.keep_clean,
+            args.image_edit_model, args.no_text, args.keep_clean, args.direct_ppt,
         )
 
     sys.exit(0 if success else 1)

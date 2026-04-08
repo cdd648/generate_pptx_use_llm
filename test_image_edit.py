@@ -1,166 +1,183 @@
 """
-测试图片编辑功能
-用于验证 gemini-3.1-flash-image-preview 模型是否可用
+Compare official Gemini API image editing with the proxy API.
 """
+
 import os
-import sys
-from dotenv import load_dotenv
 
-load_dotenv()
+from openai import OpenAI
 
-# 测试配置
-TEST_IMAGE_PATH = "examples/俄罗斯地理和文化/01.jpg"  # 使用示例图片
-API_KEY = os.getenv("GEMINI_API_KEY", "")
-BASE_URL = "https://api.vectorengine.ai/v1"  # 你提供的代理地址
+from test_support import (
+    find_test_image,
+    get_api_key,
+    get_proxy_base_url,
+    image_to_data_uri,
+    init_env,
+    parse_proxy_image_response,
+    read_image_bytes,
+    short_text,
+)
 
-def test_native_gemini():
-    """测试 Google 官方 Gemini API"""
+
+init_env()
+
+API_KEY = get_api_key()
+BASE_URL = get_proxy_base_url()
+TEST_IMAGE_PATH = find_test_image()
+
+OFFICIAL_TEXT_MODEL = os.getenv("TEST_OFFICIAL_TEXT_MODEL", "gemini-2.0-flash")
+OFFICIAL_IMAGE_MODEL = os.getenv(
+    "TEST_OFFICIAL_IMAGE_MODEL",
+    "gemini-3.1-flash-image-preview",
+)
+PROXY_TEXT_MODEL = os.getenv("TEST_PROXY_TEXT_MODEL", "gemini-2.0-flash")
+PROXY_IMAGE_MODEL = os.getenv(
+    "TEST_PROXY_IMAGE_EDIT_MODEL",
+    "gemini-3.1-flash-image-preview",
+)
+
+
+def test_native_gemini() -> bool:
     print("=" * 60)
-    print("测试 1: Google 官方 Gemini API")
+    print("Test 1: Official Gemini API")
     print("=" * 60)
-    
+
     if not API_KEY:
-        print("❌ 错误: 未设置 GEMINI_API_KEY 环境变量")
+        print("[X] GEMINI_API_KEY is not set")
         return False
-    
+    if TEST_IMAGE_PATH is None:
+        print("[X] No test image was found under examples/")
+        return False
+    if API_KEY.startswith("sk-"):
+        print("[!] The configured key looks like a proxy key; official API calls may fail")
+
     try:
         from google import genai
         from google.genai import types
-        
+
         client = genai.Client(api_key=API_KEY)
-        
-        # 测试文本生成
-        print("\n1. 测试文本生成...")
-        response = client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents="Hello",
+
+        print(f"\nText model: {OFFICIAL_TEXT_MODEL}")
+        text_response = client.models.generate_content(
+            model=OFFICIAL_TEXT_MODEL,
+            contents="Reply with OK only.",
         )
-        print(f"✅ 文本生成成功: {response.text[:50]}...")
-        
-        # 测试图片编辑
-        print("\n2. 测试图片编辑 (gemini-3.1-flash-image-preview)...")
-        if not os.path.exists(TEST_IMAGE_PATH):
-            print(f"❌ 测试图片不存在: {TEST_IMAGE_PATH}")
-            return False
-            
-        with open(TEST_IMAGE_PATH, "rb") as f:
-            img_bytes = f.read()
-        
-        parts = [
-            types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"),
-            types.Part.from_text(text="Remove all text from this image"),
-        ]
-        
+        print(f"[OK] Official text generation succeeded: {short_text(text_response.text)}")
+
+        image_bytes = read_image_bytes(TEST_IMAGE_PATH)
+        mime_type = "image/png" if TEST_IMAGE_PATH.suffix.lower() == ".png" else "image/jpeg"
+        print(f"Image model: {OFFICIAL_IMAGE_MODEL}")
+        print(f"Image: {TEST_IMAGE_PATH}")
+
         response = client.models.generate_content(
-            model="gemini-3.1-flash-image-preview",
-            contents=parts,
+            model=OFFICIAL_IMAGE_MODEL,
+            contents=[
+                types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+                types.Part.from_text(text="Remove all text from this image"),
+            ],
             config=types.GenerateContentConfig(
                 response_modalities=["IMAGE", "TEXT"],
             ),
         )
-        
-        # 检查是否返回图片
-        for part in response.candidates[0].content.parts:
-            if part.inline_data is not None:
-                print(f"✅ 图片编辑成功！返回 {len(part.inline_data.data)} 字节")
-                return True
-        
-        print("❌ 图片编辑未返回图片数据")
-        print(f"响应内容: {response}")
+
+        for candidate in response.candidates:
+            for part in candidate.content.parts:
+                if part.inline_data is not None:
+                    print(
+                        "[OK] Official image edit succeeded, returned "
+                        f"{len(part.inline_data.data)} bytes"
+                    )
+                    return True
+
+        print("[X] Official image edit returned no image data")
+        print(f"Response preview: {short_text(response)}")
         return False
-        
     except Exception as e:
-        print(f"❌ 错误: {e}")
+        print(f"[X] Official Gemini API failed: {e}")
         return False
 
 
-def test_proxy_api():
-    """测试第三方代理 API"""
+def test_proxy_api() -> bool:
     print("\n" + "=" * 60)
-    print("测试 2: 第三方代理 API (vectorengine.ai)")
+    print("Test 2: Proxy API")
     print("=" * 60)
-    
+
     if not API_KEY:
-        print("❌ 错误: 未设置 GEMINI_API_KEY 环境变量")
+        print("[X] GEMINI_API_KEY is not set")
         return False
-    
+    if TEST_IMAGE_PATH is None:
+        print("[X] No test image was found under examples/")
+        return False
+
     try:
-        from openai import OpenAI
-        
-        client = OpenAI(
-            api_key=API_KEY,
-            base_url=BASE_URL,
-        )
-        
-        # 测试文本生成
-        print("\n1. 测试文本生成...")
+        client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
+
+        print(f"\nText model: {PROXY_TEXT_MODEL}")
+        try:
+            text_response = client.chat.completions.create(
+                model=PROXY_TEXT_MODEL,
+                messages=[{"role": "user", "content": "Reply with OK only."}],
+            )
+            print(
+                "[OK] Proxy text generation succeeded: "
+                f"{short_text(text_response.choices[0].message.content)}"
+            )
+        except Exception as text_error:
+            print(f"[!] Proxy text generation failed: {text_error}")
+
+        print(f"Image model: {PROXY_IMAGE_MODEL}")
+        print(f"Image: {TEST_IMAGE_PATH}")
         response = client.chat.completions.create(
-            model="gemini-2.0-flash",
-            messages=[{"role": "user", "content": "Hello"}],
+            model=PROXY_IMAGE_MODEL,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Remove all text from this image"},
+                        {"type": "image_url", "image_url": {"url": image_to_data_uri(TEST_IMAGE_PATH)}},
+                    ],
+                }
+            ],
+            extra_body={"response_modalities": ["image"]},
         )
-        print(f"✅ 文本生成成功: {response.choices[0].message.content[:50]}...")
-        
-        # 测试图片编辑
-        print("\n2. 测试图片编辑 (gemini-3.1-flash-image-preview)...")
-        if not os.path.exists(TEST_IMAGE_PATH):
-            print(f"❌ 测试图片不存在: {TEST_IMAGE_PATH}")
-            return False
-        
-        with open(TEST_IMAGE_PATH, "rb") as f:
-            image_file = f.read()
-        
-        response = client.images.edit(
-            model="gemini-3.1-flash-image-preview",
-            prompt="Remove all text from this image",
-            image=image_file,
-            n=1,
+
+        image_data = parse_proxy_image_response(
+            response.choices[0].message.content,
+            response,
         )
-        
-        if response.data and response.data[0].b64_json:
-            import base64
-            img_data = base64.b64decode(response.data[0].b64_json)
-            print(f"✅ 图片编辑成功！返回 {len(img_data)} 字节")
+        if image_data:
+            print(f"[OK] Proxy image edit succeeded, returned {len(image_data)} bytes")
             return True
-        elif response.data and response.data[0].url:
-            print(f"✅ 图片编辑成功！返回 URL: {response.data[0].url}")
-            return True
-        else:
-            print("❌ 图片编辑未返回图片数据")
-            print(f"响应: {response}")
-            return False
-            
+
+        print("[X] Proxy image edit returned no image data")
+        print(f"Content preview: {short_text(response.choices[0].message.content)}")
+        return False
     except Exception as e:
-        print(f"❌ 错误: {e}")
+        print(f"[X] Proxy API failed: {e}")
         return False
 
 
-def main():
-    print("图片编辑功能测试工具")
-    print(f"测试图片: {TEST_IMAGE_PATH}")
-    print(f"API Key: {'已设置' if API_KEY else '未设置'}")
+def main() -> None:
+    print("Image editing capability test")
+    print(f"Base URL: {BASE_URL}")
+    print(f"API key set: {'yes' if API_KEY else 'no'}")
+    print(f"Test image: {TEST_IMAGE_PATH if TEST_IMAGE_PATH else 'not found'}")
     print()
-    
-    # 运行测试
-    results = []
-    
-    # 测试官方 API
-    results.append(("Google 官方 API", test_native_gemini()))
-    
-    # 测试代理 API
-    results.append(("vectorengine.ai 代理", test_proxy_api()))
-    
-    # 汇总结果
+
+    results = [
+        ("Official Gemini API", test_native_gemini()),
+        ("Proxy API", test_proxy_api()),
+    ]
+
     print("\n" + "=" * 60)
-    print("测试结果汇总")
+    print("Summary")
     print("=" * 60)
     for name, success in results:
-        status = "✅ 通过" if success else "❌ 失败"
+        status = "[OK]" if success else "[X]"
         print(f"{name}: {status}")
-    
-    print("\n建议:")
-    print("- 如果官方 API 通过但代理失败，说明代理不支持图片编辑")
-    print("- 如果都失败，说明 gemini-3.1-flash-image-preview 模型已下线")
-    print("- 建议勾选「跳过文本叠加层」选项作为替代方案")
+
+    print("\nNotes:")
+    print("- If the official API fails with API_KEY_INVALID, the configured key is not a Google key.")
+    print("- If the proxy API fails while the official API passes, the proxy is the blocker.")
 
 
 if __name__ == "__main__":
