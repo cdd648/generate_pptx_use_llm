@@ -191,7 +191,18 @@ def remove_text_from_image(
             image_path=current_input,
         )
         if image_data is None:
-            raise RuntimeError("Gemini 图片编辑未返回图片数据")
+            if attempt == 1:
+                raise RuntimeError(
+                    "Gemini 图片编辑未返回图片数据。\n"
+                    "可能原因：\n"
+                    "1. 图片编辑模型名称不正确（当前: {}）\n"
+                    "2. 第三方代理不支持图片编辑功能\n"
+                    "3. API 权限不足\n\n"
+                    "建议：尝试使用 Google 官方 API，或启用「跳过文本叠加层」选项".format(model)
+                )
+            else:
+                print(f"  ⚠ 第 {attempt} 轮编辑失败，使用上一次结果")
+                break
 
         with open(output_path, "wb") as f:
             f.write(image_data)

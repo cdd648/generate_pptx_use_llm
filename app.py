@@ -274,7 +274,25 @@ def _process_single_image_with_progress(
                 clean_image_path = clean_output
 
         except Exception as e:
-            status_container.error(f"❌ 处理失败: {e}")
+            error_msg = str(e)
+            if "图片编辑未返回" in error_msg or "image edit" in error_msg.lower():
+                status_container.error(f"""
+### ❌ 图片编辑失败
+
+**当前模型**: `{config['image_edit_model']}`
+
+**可能原因：**
+1. 📛 **模型名称不正确** - 该模型可能不存在或已下线
+2. 🔗 **第三方代理不支持** - 如果配置了 Base URL，代理可能不支持图片编辑
+3. 🔑 **API 权限不足** - 图片编辑功能需要特殊权限
+
+**解决方案：**
+- ✅ 勾选侧边栏 **「跳过文本叠加层」** 选项（推荐）
+- ✅ 尝试使用 Google 官方 API（清空 Base URL）
+- ✅ 更换其他支持图片编辑的模型名称
+""")
+            else:
+                status_container.error(f"❌ 处理失败: {error_msg}")
             st.exception(e)
             clean_image_path = image_path
             text_elements = None
