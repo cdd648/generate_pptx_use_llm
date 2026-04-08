@@ -42,7 +42,7 @@ except ImportError:
             return override
 
         effective_base_url = base_url if base_url is not None else os.getenv("GEMINI_BASE_URL", "")
-        return "gpt-4o" if effective_base_url else "gemini-3.1-pro-preview"
+        return "gemini-3.1-pro-preview" if effective_base_url else "gemini-3.1-pro-preview"
 
 try:
     from openai import APIStatusError as OpenAIStatusError, APIConnectionError as OpenAIConnectionError, APITimeoutError as OpenAITimeoutError

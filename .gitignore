@@ -41,3 +41,6 @@ output/
 
 # Streamlit
 .streamlit/
+
+# Test scripts - 临时测试脚本不提交
+test_*.py
