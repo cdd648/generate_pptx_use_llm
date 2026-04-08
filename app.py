@@ -124,14 +124,14 @@ def _render_sidebar():
         api_key = st.text_input(
             "Gemini API Key",
             type="password",
-            value=os.getenv("GEMINI_API_KEY", ""),
-            help="Google Gemini API 密钥，也可通过环境变量 GEMINI_API_KEY 设置",
+            value="",
+            help="请输入你自己的 Gemini API Key",
         )
 
         base_url = st.text_input(
             "API Base URL（可选）",
-            value=os.getenv("GEMINI_BASE_URL", ""),
-            help="第三方 API 端点，留空则使用 Google 官方端点",
+            value="",
+            help="可选。使用第三方代理时填写，留空则使用 Google 官方端点",
         )
 
         _render_api_mode_notice(base_url)
