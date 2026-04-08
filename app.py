@@ -27,10 +27,22 @@ from generate_pptx import (
     analyze_image_text,
     build_slide_from_image,
     remove_text_from_image,
-    resolve_default_text_model,
 )
 from src.gemini_client import reset_client
 from google.genai.errors import ClientError as GeminiClientError, ServerError as GeminiServerError
+
+try:
+    from generate_pptx import resolve_default_text_model
+except ImportError:
+    # Backward-compatible fallback for deployments that still have an older
+    # generate_pptx.py without this helper.
+    def resolve_default_text_model(base_url: str | None = None) -> str:
+        override = os.getenv("TEXT_ANALYSIS_MODEL_DEFAULT", "").strip()
+        if override:
+            return override
+
+        effective_base_url = base_url if base_url is not None else os.getenv("GEMINI_BASE_URL", "")
+        return "gpt-4o" if effective_base_url else "gemini-3.1-pro-preview"
 
 try:
     from openai import APIStatusError as OpenAIStatusError, APIConnectionError as OpenAIConnectionError, APITimeoutError as OpenAITimeoutError
